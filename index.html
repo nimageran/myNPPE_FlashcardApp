@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Nima Flashcards – Clean UI + Animations + Requeue</title>
+  <title>Nima Flashcards – Pro Sampling + Zoom</title>
   <meta name="theme-color" content="#f8fafc" />
   <style>
     :root{ --bg:#ffffff; --surface:#f8fafc; --border:#e5e7eb; --ink:#0f172a; --muted:#64748b; --accent:#2563eb; --accent-ink:#ffffff; --radius:18px; --ok:#16a34a; --bad:#dc2626; }
@@ -58,6 +58,12 @@
 
     .hide{display:none!important}
     .kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:3px 7px;font-size:12px;color:var(--ink)}
+
+    /* Lightbox Styles */
+    .lightbox { position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.95); z-index:9999; display:flex; align-items:center; justify-content:center; opacity:0; pointer-events:none; transition:opacity 0.25s; touch-action:none; }
+    .lightbox.show { opacity:1; pointer-events:auto; }
+    .lightbox img { max-width:100%; max-height:100%; object-fit:contain; transform-origin:center; will-change:transform; }
+    .lightbox-close { position:absolute; top:max(16px, env(safe-area-inset-top)); right:20px; color:#fff; font-size:40px; line-height:1; padding:10px; z-index:10000; cursor:pointer; user-select:none; }
   </style>
 </head>
 <body>
@@ -113,7 +119,7 @@
         <label class="label">Mode</label>
         <select id="mode" class="select">
           <option value="ordered">Ordered</option>
-          <option value="random" selected>Random</option>
+          <option value="random" selected>Random (Shuffle)</option>
         </select>
       </div>
       <div class="fieldset">
@@ -161,9 +167,12 @@
   </div>
 </div>
 
-<script>
-// ===== Clean UI + tap flip + flip animation + swipe-to-grade + requeue unknowns =====
+<div id="lightbox" class="lightbox hide">
+  <div class="lightbox-close">×</div>
+  <img id="lb-img" alt="Zoomed Image" />
+</div>
 
+<script>
 const CSV_URL = 'assets/cards.csv';
 const STORAGE_KEY = 'nppe_cards_progress_clean_v5';
 const AUDIO_KEY = 'nppe_audio_prefs_v2';
@@ -181,6 +190,9 @@ let speakTimer = null;
 let requeueDistance = 10;
 let pending = [];
 let isFlipping = false;
+
+// The core engine for Shuffle-and-Deal
+let shuffleQueue = []; 
 
 const $ = s => document.querySelector(s);
 const face = $('#face');
@@ -204,7 +216,15 @@ const speakBackChk = $('#speakBack');
 const requeueSel = $('#requeueSel');
 const themeSel = $('#themeSel');
 
-// Sheet controls
+// Lightbox Elements
+const lightbox = $('#lightbox');
+const lbImg = $('#lb-img');
+const lbClose = $('.lightbox-close');
+
+// Clear shuffle queue if fundamental settings change
+modeSel.addEventListener('change', () => { shuffleQueue = []; });
+skipKnownChk.addEventListener('change', () => { shuffleQueue = []; });
+
 openBtn.addEventListener('click', () => toggleSheet(true));
 $('#closeSheet').addEventListener('click', () => toggleSheet(false));
 sheet.addEventListener('click', e => { if (e.target === sheet) toggleSheet(false) });
@@ -214,7 +234,6 @@ function toggleSheet(open) {
   sheet.setAttribute('aria-hidden', open ? 'false' : 'true');
 }
 
-// Theme handling
 function loadTheme() {
   const saved = localStorage.getItem(THEME_KEY) || 'light';
   document.documentElement.setAttribute('data-theme', saved);
@@ -230,11 +249,8 @@ if (themeSel) {
   themeSel.addEventListener('change', () => saveTheme(themeSel.value));
 }
 
-// Initialize
 (async function init() {
   loadTheme();
-  
-  // Load audio prefs
   try {
     const raw = localStorage.getItem(AUDIO_KEY);
     if (raw) Object.assign(audioPrefs, JSON.parse(raw));
@@ -247,12 +263,8 @@ if (themeSel) {
   await loadVoices();
   populateVoiceSelect();
 
-  // Load requeue setting
-  try {
-    requeueDistance = parseInt(localStorage.getItem(REQUEUE_KEY) || '10', 10);
-  } catch (e) {
-    requeueDistance = 10;
-  }
+  try { requeueDistance = parseInt(localStorage.getItem(REQUEUE_KEY) || '10', 10); } 
+  catch (e) { requeueDistance = 10; }
   
   if (requeueSel) {
     requeueSel.value = String(requeueDistance);
@@ -262,7 +274,6 @@ if (themeSel) {
     });
   }
 
-  // Load CSV deck or use sample data
   try {
     let text;
     try {
@@ -271,16 +282,7 @@ if (themeSel) {
       text = await response.text();
       status.textContent = 'Ready';
     } catch (fetchError) {
-      // Use sample data if CSV not found
-      text = `id,front,back
-1,What is the capital of France?,Paris
-2,What is 2 + 2?,4
-3,What color is the sky?,Blue
-4,Who wrote Romeo and Juliet?,William Shakespeare
-5,What is H2O?,Water
-6,How many continents are there?,7
-7,What is the largest planet?,Jupiter
-8,What is the speed of light?,"299,792,458 m/s"`;
+      text = `id,front,back\n1,What is the capital of France?,Paris\n2,What is 2 + 2?,4\n3,What color is the sky?,Blue\n4,Who wrote Romeo and Juliet?,William Shakespeare`;
       status.textContent = 'Sample Data';
     }
 
@@ -301,28 +303,22 @@ if (themeSel) {
       seen: 0
     }));
 
-    // Ensure unique IDs
     const seen = new Set();
     for (const c of deck) {
       let base = c.id;
       let n = 2;
-      while (seen.has(c.id)) {
-        c.id = `${base}-${n++}`;
-      }
+      while (seen.has(c.id)) { c.id = `${base}-${n++}`; }
       seen.add(c.id);
     }
 
     loadProgress();
     updateStats();
-    
   } catch (e) {
     status.textContent = 'Error';
     face.innerHTML = 'Error loading cards: ' + e.message;
-    console.error(e);
   }
 })();
 
-// Button listeners
 startBtn.addEventListener('click', () => {
   start();
   warmUpSpeech();
@@ -334,71 +330,115 @@ $('#good').addEventListener('click', () => grade(true));
 $('#again').addEventListener('click', () => grade(false));
 $('#resetProgress').addEventListener('click', () => {
   if (confirm('Clear Known/Unknown and Seen counts?')) {
-    deck.forEach(c => {
-      c.known = false;
-      c.seen = 0;
-    });
+    deck.forEach(c => { c.known = false; c.seen = 0; });
+    shuffleQueue = []; 
     saveProgress();
     updateStats();
     renderFace();
   }
 });
 
-// Keyboard shortcuts
 document.addEventListener('keydown', e => {
-  if (e.key === ' ') {
-    e.preventDefault();
-    flip();
-  }
-  if (e.key === 'ArrowRight') {
-    next();
-  }
-  if (e.key === '1') {
-    grade(false);
-  }
-  if (e.key === '2') {
-    grade(true);
-  }
+  if (e.key === ' ') { e.preventDefault(); flip(); }
+  if (e.key === 'ArrowRight') { next(); }
+  if (e.key === '1') { grade(false); }
+  if (e.key === '2') { grade(true); }
 });
 
-// Tap-to-flip
 cardEl.addEventListener('click', (e) => {
   if (
     e.target.closest('.markbar') ||
     e.target.closest('.fabbar') ||
     e.target.closest('#openControls') ||
-    e.target.closest('#sheet')
+    e.target.closest('#sheet') ||
+    e.target === img // Do not flip if they clicked the image
   ) return;
   flip();
 }, { passive: true });
 
+// --- LIGHTBOX GESTURE LOGIC ---
+let lbScale = 1, lbStartX = 0, lbStartY = 0, lbX = 0, lbY = 0;
+let lbStartDist = 0, lbStartScale = 1;
+
+img.addEventListener('click', (e) => {
+  e.stopPropagation();
+  lbImg.src = img.src;
+  lightbox.classList.remove('hide');
+  void lightbox.offsetWidth; // force reflow
+  lightbox.classList.add('show');
+});
+
+function closeLightbox() {
+  lightbox.classList.remove('show');
+  setTimeout(() => {
+    lightbox.classList.add('hide');
+    lbScale = 1; lbX = 0; lbY = 0;
+    updateLbTransform();
+  }, 250);
+}
+
+lbClose.addEventListener('click', closeLightbox);
+lightbox.addEventListener('click', (e) => {
+  if (e.target === lightbox) closeLightbox();
+});
+
+lbImg.addEventListener('touchstart', e => {
+  if (e.touches.length === 2) {
+    lbStartDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+    lbStartScale = lbScale;
+  } else if (e.touches.length === 1) {
+    lbStartX = e.touches[0].clientX - lbX;
+    lbStartY = e.touches[0].clientY - lbY;
+  }
+}, {passive: false});
+
+lbImg.addEventListener('touchmove', e => {
+  e.preventDefault(); 
+  if (e.touches.length === 2) {
+    const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+    lbScale = Math.max(1, Math.min(lbStartScale * (dist / lbStartDist), 5));
+    updateLbTransform();
+  } else if (e.touches.length === 1 && lbScale > 1) {
+    lbX = e.touches[0].clientX - lbStartX;
+    lbY = e.touches[0].clientY - lbStartY;
+    updateLbTransform();
+  }
+}, {passive: false});
+
+function updateLbTransform() {
+  lbImg.style.transform = `translate(${lbX}px, ${lbY}px) scale(${lbScale})`;
+}
+// --- END LIGHTBOX LOGIC ---
+
 function start() {
   cursor = -1;
   showingBack = false;
+  shuffleQueue = [];
   next();
 }
 
+function handleAllDone() {
+  face.innerHTML = 'All done 🎉 Uncheck <b>Skip Known</b> to review again.';
+  hideImage();
+  idxLabel.textContent = '—';
+  cancelSpeak();
+  shuffleQueue = [];
+}
+
+// Ordered logic needs this
 function eligibleIndices() {
   const skip = skipKnownChk.checked;
-  const mode = modeSel.value;
   let idx = deck.map((_, i) => i);
-  
   if (skip) idx = idx.filter(i => !deck[i].known);
-  
-  if (mode === 'ordered') {
-    const s = Math.max(cursor + 1, 0);
-    const tail = idx.filter(i => i >= s);
-    const head = idx.filter(i => i < s);
-    return tail.length ? tail : head;
-  }
-  
-  return idx;
+  const s = Math.max(cursor + 1, 0);
+  const tail = idx.filter(i => i >= s);
+  const head = idx.filter(i => i < s);
+  return tail.length ? tail : head;
 }
 
 function next() {
   if (!deck.length) return;
   
-  // Check if any queued unknown is due
   const revisit = tickPendingAndMaybePop();
   if (revisit >= 0) {
     cursor = revisit;
@@ -409,19 +449,38 @@ function next() {
     return;
   }
   
-  // Otherwise pick per mode/skipKnown
-  const choices = eligibleIndices();
-  if (!choices.length) {
-    face.innerHTML = 'All done 🎉 Uncheck <b>Skip Known</b> to review again.';
-    hideImage();
-    idxLabel.textContent = '—';
-    cancelSpeak();
-    return;
+  if (modeSel.value === 'random') {
+    if (skipKnownChk.checked) {
+      shuffleQueue = shuffleQueue.filter(i => !deck[i].known);
+    }
+
+    if (shuffleQueue.length === 0) {
+      let eligible = deck.map((_, i) => i);
+      if (skipKnownChk.checked) eligible = eligible.filter(i => !deck[i].known);
+
+      if (eligible.length === 0) {
+        handleAllDone();
+        return;
+      }
+      
+      // Fisher-Yates Shuffle
+      for (let i = eligible.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [eligible[i], eligible[j]] = [eligible[j], eligible[i]];
+      }
+      shuffleQueue = eligible;
+    }
+    
+    cursor = shuffleQueue.pop();
+  } else {
+    // Ordered mode
+    const choices = eligibleIndices();
+    if (!choices.length) {
+      handleAllDone();
+      return;
+    }
+    cursor = choices[0];
   }
-  
-  cursor = (modeSel.value === 'random') ? 
-    choices[Math.floor(Math.random() * choices.length)] : 
-    choices[0];
   
   deck[cursor].seen++;
   saveProgress();
@@ -431,7 +490,6 @@ function next() {
 
 function flip() {
   if (cursor < 0 || isFlipping) return;
-  
   if (!cardEl) {
     showingBack = !showingBack;
     renderFace('flip');
@@ -440,13 +498,11 @@ function flip() {
   
   isFlipping = true;
   cardEl.classList.add('flip-anim', 'flip-phase');
-  
   setTimeout(() => {
     showingBack = !showingBack;
     renderFace('flip');
     cardEl.classList.remove('flip-phase');
     cardEl.classList.add('flip-reset');
-    
     setTimeout(() => {
       cardEl.classList.remove('flip-anim', 'flip-reset');
       isFlipping = false;
@@ -459,7 +515,6 @@ function renderFace(trigger) {
     face.textContent = 'Press Start';
     return;
   }
-  
   const c = deck[cursor];
   idxLabel.textContent = c.id;
   face.innerHTML = showingBack ? escape(c.back) : escape(c.front);
@@ -473,9 +528,7 @@ function renderFace(trigger) {
 
 function grade(known) {
   if (cursor < 0) return;
-  
   const id = deck[cursor].id;
-  
   if (known) {
     deck[cursor].known = true;
     pending = pending.filter(p => p.id !== id);
@@ -483,7 +536,6 @@ function grade(known) {
     deck[cursor].known = false;
     queueCard(id);
   }
-  
   saveProgress();
   updateStats();
   next();
@@ -498,13 +550,8 @@ function hideImage() {
 function showImageForId(id) {
   const exts = ['png', 'jpg', 'jpeg', 'webp', 'svg'];
   let i = 0;
-  
   const tryNext = () => {
-    if (i >= exts.length) {
-      hideImage();
-      return;
-    }
-    
+    if (i >= exts.length) { hideImage(); return; }
     const src = `assets/images/${id}.${exts[i++]}`;
     img.onerror = tryNext;
     img.onload = () => {
@@ -514,7 +561,6 @@ function showImageForId(id) {
     };
     img.src = src;
   };
-  
   tryNext();
 }
 
@@ -522,7 +568,6 @@ function updateStats() {
   const total = deck.length;
   const known = deck.filter(c => c.known).length;
   const seen = deck.reduce((a, c) => a + (c.seen > 0 ? 1 : 0), 0);
-  
   if (statTotal) statTotal.textContent = total;
   if (statKnown) statKnown.textContent = known;
   if (statUnknown) statUnknown.textContent = Math.max(0, total - known);
@@ -530,11 +575,7 @@ function updateStats() {
 }
 
 function saveProgress() {
-  const payload = deck.map(c => ({
-    id: c.id,
-    known: c.known,
-    seen: c.seen
-  }));
+  const payload = deck.map(c => ({ id: c.id, known: c.known, seen: c.seen }));
   localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
 }
 
@@ -542,31 +583,22 @@ function loadProgress() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return;
-    
     const arr = JSON.parse(raw);
     const map = new Map(arr.map(x => [x.id, x]));
-    
     deck.forEach(c => {
       const m = map.get(c.id);
-      if (m) {
-        c.known = !!m.known;
-        c.seen = m.seen | 0;
-      }
+      if (m) { c.known = !!m.known; c.seen = m.seen | 0; }
     });
   } catch (e) {}
 }
 
-// Swipe-to-grade
 (function() {
   if (!cardEl) return;
-  
   let startX = 0, startY = 0, dx = 0, active = false;
   const THRESH = 90;
   
   cardEl.addEventListener('touchstart', (e) => {
-    if (e.touches.length !== 1) return;
-    if (document.querySelector('#sheet.open')) return;
-    
+    if (e.touches.length !== 1 || document.querySelector('#sheet.open') || !lightbox.classList.contains('hide')) return;
     startX = e.touches[0].clientX;
     startY = e.touches[0].clientY;
     dx = 0;
@@ -576,19 +608,16 @@ function loadProgress() {
   
   cardEl.addEventListener('touchmove', (e) => {
     if (!active) return;
-    
     const x = e.touches[0].clientX;
     const y = e.touches[0].clientY;
     dx = x - startX;
     const dy = y - startY;
-    
     if (Math.abs(dy) > Math.abs(dx) + 20) {
       active = false;
       cardEl.classList.remove('swiping');
       cardEl.style.transform = '';
       return;
     }
-    
     cardEl.style.transform = `translateX(${dx}px) rotate(${dx * 0.04}deg)`;
   }, { passive: true });
   
@@ -600,23 +629,14 @@ function loadProgress() {
   cardEl.addEventListener('touchend', () => {
     if (!active) return;
     active = false;
-    
     if (dx > THRESH) {
       cardEl.classList.remove('swipe-left');
       cardEl.classList.add('swipe-right');
-      setTimeout(() => {
-        cardEl.classList.remove('swipe-right');
-        endSwipe();
-        grade(true);
-      }, 240);
+      setTimeout(() => { cardEl.classList.remove('swipe-right'); endSwipe(); grade(true); }, 240);
     } else if (dx < -THRESH) {
       cardEl.classList.remove('swipe-right');
       cardEl.classList.add('swipe-left');
-      setTimeout(() => {
-        cardEl.classList.remove('swipe-left');
-        endSwipe();
-        grade(false);
-      }, 240);
+      setTimeout(() => { cardEl.classList.remove('swipe-left'); endSwipe(); grade(false); }, 240);
     } else {
       endSwipe();
     }
@@ -628,34 +648,23 @@ function loadProgress() {
   }, { passive: true });
 })();
 
-// Requeue helpers
 function queueCard(id) {
   const existing = pending.find(p => p.id === id);
-  if (existing) {
-    existing.due = requeueDistance;
-    return;
-  }
+  if (existing) { existing.due = requeueDistance; return; }
   pending.push({ id, due: requeueDistance });
 }
 
 function tickPendingAndMaybePop() {
   if (!pending.length) return -1;
-  
-  for (const p of pending) {
-    if (p.due > 0) p.due--;
-  }
-  
+  for (const p of pending) { if (p.due > 0) p.due--; }
   const idx = pending.findIndex(p => p.due === 0);
   if (idx >= 0) {
     const id = pending.splice(idx, 1)[0].id;
-    const i = deck.findIndex(c => c.id === id);
-    return i;
+    return deck.findIndex(c => c.id === id);
   }
-  
   return -1;
 }
 
-// Audio functions
 async function loadVoices() {
   return new Promise(res => {
     const ready = () => {
@@ -666,21 +675,15 @@ async function loadVoices() {
         res();
       }
     };
-    
     speechSynthesis.addEventListener('voiceschanged', ready);
     ready();
-    
-    setTimeout(() => {
-      voices = speechSynthesis.getVoices();
-      res();
-    }, 800);
+    setTimeout(() => { voices = speechSynthesis.getVoices(); res(); }, 800);
   });
 }
 
 function populateVoiceSelect() {
   voiceSel.innerHTML = '';
   const opts = voices.length ? voices : [{ name: 'Default', voiceURI: '' }];
-  
   const sorted = opts.slice().sort((a, b) => {
     const la = (a.lang || '').toLowerCase();
     const lb = (b.lang || '').toLowerCase();
@@ -688,17 +691,13 @@ function populateVoiceSelect() {
     const pb = (lb.includes('en-ca') || lb.includes('en-us')) ? 0 : 1;
     return pa - pb || (a.name || '').localeCompare(b.name || '');
   });
-  
   for (const v of sorted) {
     const o = document.createElement('option');
     o.value = v.voiceURI || v.name || '';
     o.textContent = v.name ? `${v.name} (${v.lang || ''})` : 'Default';
     voiceSel.appendChild(o);
   }
-  
-  if (audioPrefs.voiceURI) {
-    voiceSel.value = audioPrefs.voiceURI;
-  }
+  if (audioPrefs.voiceURI) { voiceSel.value = audioPrefs.voiceURI; }
 }
 
 function warmUpSpeech() {
@@ -711,139 +710,68 @@ function warmUpSpeech() {
   } catch (e) {}
 }
 
-function saveAudioPrefs() {
-  localStorage.setItem(AUDIO_KEY, JSON.stringify(audioPrefs));
-}
+function saveAudioPrefs() { localStorage.setItem(AUDIO_KEY, JSON.stringify(audioPrefs)); }
 
 function cancelSpeak() {
-  if (speakTimer) {
-    clearTimeout(speakTimer);
-    speakTimer = null;
-  }
-  try {
-    speechSynthesis.cancel();
-  } catch (e) {}
+  if (speakTimer) { clearTimeout(speakTimer); speakTimer = null; }
+  try { speechSynthesis.cancel(); } catch (e) {}
 }
 
 function autoSpeakCurrent(trigger) {
   if (!('speechSynthesis' in window)) return;
-  
   const c = deck[cursor];
   if (!c) return;
-  
   const text = showingBack ? c.back : c.front;
   const want = showingBack ? audioPrefs.speakBack : audioPrefs.speakFront;
-  
-  if (!want || !text) {
-    cancelSpeak();
-    return;
-  }
-  
+  if (!want || !text) { cancelSpeak(); return; }
   const delay = (trigger === 'flip') ? DELAY_FLIP_MS : DELAY_NEXT_MS;
   cancelSpeak();
   speakTimer = setTimeout(() => speak(text), delay);
 }
 
 function speak(txt) {
-  try {
-    speechSynthesis.cancel();
-  } catch (e) {}
-  
+  try { speechSynthesis.cancel(); } catch (e) {}
   if (!txt) return;
-  
   const u = new SpeechSynthesisUtterance(txt);
   u.rate = audioPrefs.rate || 1;
-  
   const v = voices.find(v => v.voiceURI === audioPrefs.voiceURI || v.name === audioPrefs.voiceURI);
   if (v) u.voice = v;
-  
-  try {
-    speechSynthesis.pause();
-    speechSynthesis.resume();
-  } catch (e) {}
-  
-  setTimeout(() => {
-    try {
-      speechSynthesis.speak(u);
-    } catch (e) {}
-  }, 0);
+  try { speechSynthesis.pause(); speechSynthesis.resume(); } catch (e) {}
+  setTimeout(() => { try { speechSynthesis.speak(u); } catch (e) {} }, 0);
 }
 
 function normalizeId(raw) {
   let s = String(raw).trim().toLowerCase();
   const m = s.match(/(\d+)/);
-  if (m) {
-    return `card${parseInt(m[1], 10)}`;
-  }
+  if (m) return `card${parseInt(m[1], 10)}`;
   if (s.startsWith('card')) return s;
   return s ? `card-${s}` : 'card0';
 }
 
 function parseCSV(str) {
-  const rows = [];
-  let row = [];
-  let cur = '';
-  let i = 0;
-  let inQ = false;
-  
+  const rows = []; let row = []; let cur = ''; let i = 0; let inQ = false;
   while (i < str.length) {
     const ch = str[i];
-    
     if (inQ) {
       if (ch === '"') {
-        if (str[i + 1] === '"') {
-          cur += '"';
-          i += 2;
-          continue;
-        }
-        inQ = false;
-        i++;
-        continue;
+        if (str[i + 1] === '"') { cur += '"'; i += 2; continue; }
+        inQ = false; i++; continue;
       }
-      cur += ch;
-      i++;
-      continue;
+      cur += ch; i++; continue;
     } else {
-      if (ch === '"') {
-        inQ = true;
-        i++;
-        continue;
-      }
-      if (ch === ',') {
-        row.push(cur);
-        cur = '';
-        i++;
-        continue;
-      }
-      if (ch === '\n') {
-        row.push(cur);
-        rows.push(row);
-        row = [];
-        cur = '';
-        i++;
-        continue;
-      }
-      if (ch === '\r') {
-        i++;
-        continue;
-      }
-      cur += ch;
-      i++;
+      if (ch === '"') { inQ = true; i++; continue; }
+      if (ch === ',') { row.push(cur); cur = ''; i++; continue; }
+      if (ch === '\n') { row.push(cur); rows.push(row); row = []; cur = ''; i++; continue; }
+      if (ch === '\r') { i++; continue; }
+      cur += ch; i++;
     }
   }
-  
-  row.push(cur);
-  rows.push(row);
-  
+  row.push(cur); rows.push(row);
   return rows.filter(r => r.length > 1 || (r.length === 1 && r[0].trim() !== ''));
 }
 
 function escape(s) {
-  return (s || '').replace(/[&<>]/g, m => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;'
-  }[m]));
+  return (s || '').replace(/[&<>]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[m]));
 }
 </script>
 </body>
