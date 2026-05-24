@@ -359,13 +359,14 @@ cardEl.addEventListener('click', (e) => {
 // --- LIGHTBOX GESTURE LOGIC ---
 let lbScale = 1, lbStartX = 0, lbStartY = 0, lbX = 0, lbY = 0;
 let lbStartDist = 0, lbStartScale = 1;
+let wasDragged = false; // Tracks if you are panning/zooming
 
 const openLightbox = (e) => {
-  e.preventDefault(); // Stops Safari from getting confused by the tap
-  e.stopPropagation(); // Stops the background card from stealing the touch
+  e.preventDefault(); 
+  e.stopPropagation(); 
   lbImg.src = img.src;
   lightbox.classList.remove('hide');
-  void lightbox.offsetWidth;
+  void lightbox.offsetWidth; 
   lightbox.classList.add('show');
 };
 
@@ -382,11 +383,14 @@ function closeLightbox() {
 }
 
 lbClose.addEventListener('click', closeLightbox);
-lightbox.addEventListener('click', (e) => {
-  if (e.target === lightbox) closeLightbox();
+
+// NEW: Close if clicked anywhere, AS LONG AS it wasn't the end of a drag/zoom
+lightbox.addEventListener('click', () => {
+  if (!wasDragged) closeLightbox();
 });
 
 lbImg.addEventListener('touchstart', e => {
+  wasDragged = false; // Reset the drag tracker on a new touch
   if (e.touches.length === 2) {
     lbStartDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
     lbStartScale = lbScale;
@@ -398,6 +402,7 @@ lbImg.addEventListener('touchstart', e => {
 
 lbImg.addEventListener('touchmove', e => {
   e.preventDefault(); 
+  wasDragged = true; // Mark that the user is dragging/zooming
   if (e.touches.length === 2) {
     const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
     lbScale = Math.max(1, Math.min(lbStartScale * (dist / lbStartDist), 5));
@@ -413,6 +418,7 @@ function updateLbTransform() {
   lbImg.style.transform = `translate(${lbX}px, ${lbY}px) scale(${lbScale})`;
 }
 // --- END LIGHTBOX LOGIC ---
+
 
 function start() {
   cursor = -1;
