@@ -360,13 +360,17 @@ cardEl.addEventListener('click', (e) => {
 let lbScale = 1, lbStartX = 0, lbStartY = 0, lbX = 0, lbY = 0;
 let lbStartDist = 0, lbStartScale = 1;
 
-img.addEventListener('click', (e) => {
-  e.stopPropagation();
+const openLightbox = (e) => {
+  e.preventDefault(); // Stops Safari from getting confused by the tap
+  e.stopPropagation(); // Stops the background card from stealing the touch
   lbImg.src = img.src;
   lightbox.classList.remove('hide');
-  void lightbox.offsetWidth; // force reflow
+  void lightbox.offsetWidth;
   lightbox.classList.add('show');
-});
+};
+
+img.addEventListener('click', openLightbox);
+img.addEventListener('touchend', openLightbox);
 
 function closeLightbox() {
   lightbox.classList.remove('show');
